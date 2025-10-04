@@ -1,0 +1,678 @@
+---
+title: "NYDP_shooting report"
+author: "Minh Thy"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+**objective**
+  using dataset of shooting incident report in NYDC to identify the pattern of incident, then consider suitable action/measure as well as resource allocation base on findings, supporting public safety strategy. 
+  as an add-in activity, considering to build a model predicting the event of murder base on incident report factors, using for public safety strategy.
+  
+**extra packages** to install before using reference library in this project
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+install.packages("dplyr")
+install.packages("lubridate")
+install.packages("plotly")
+install.packages("gridExtra")
+install.packages("htmltools")
+install.packages("xgboost")
+```
+
+**PART I) DATA IMPORT, TIYING &  TRANSFORMATION:**
+
+*setup to display the result after each code*
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+*download data at this link and update to the path*
+in some country you may encounter invalid download and may need to turn on VPN to access.
+```{r}
+NYDP_data <- read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+```
+
+*have a look on data characters had been imported:*
+```{r}
+str(NYDP_data)
+```
+
+**COMMENT:**
+
+  1. data format: there is 21 volumns in this dataset, contain different data format i.e datetime, string, numeric, binary, ect. however not correctly define i.e OCCUR_DATE need to convert into datetime format, or STATISTICAL_MURDER_FLAG would be better to place in [1,0] for later analysis.
+  
+  2. data cleaning: duplicate information in [Latitude x Longtitude] vs. [Lon_Lat] vs.  [X_COORD_CD x Y_COORD_CD], let's keep only 1 of them per preferred high level grouping for approximate analysis only.
+
+
+*accordingly, data transforming will be processed on this dataset:*
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+NYDP_set1 <- NYDP_data %>%
+          mutate(OCCUR_DATE = as.Date(OCCUR_DATE, "%d/%m/%Y")) %>% 
+          select(-Lon_Lat,-X_COORD_CD,-Y_COORD_CD) %>%
+          mutate(STATISTICAL_MURDER_FLAG = as.integer(as.logical(STATISTICAL_MURDER_FLAG)))
+```
+
+*now let's look on statistic distribution of this dataset to have some understanding of the data, considering further data transformation if needed for later visuallization:*
+```{r}
+summary(NYDP_set1)
+```
+
+**COMMENT:**
+
+There are 29744 records collected from 2006 to 2024, in which 18k+ records missing occur_date, except distribution on overtime which will be remove missing occure date, remaining analysis on location-based will only remove missing location data (Latitude, Longitude) or other minor missing in JURISDICTION_CODE.
+
+
+*inspect data in categorical format*
+```{r}
+unique(NYDP_set1$BORO)
+unique(NYDP_set1$PERP_AGE_GROUP)
+unique(NYDP_set1$PERP_SEX)
+unique(NYDP_set1$PERP_RACE)
+unique(NYDP_set1$VIC_AGE_GROUP)
+unique(NYDP_set1$VIC_SEX)
+unique(NYDP_set1$VIC_RACE)
+```
+
+**COMMENT**
+
+here we see some abnormal data to processing into unknown group
+
+PERP_AGE_GROUP: "1020"    "940"     "224"     "2021"
+
+VIC_AGE_GROUP: "1022"  
+
+
+*filter out missing data from JURISDICTION_CODE, Latitude, Longitude.*
+```{r}
+df <- NYDP_set1 %>%
+  # drop rows with missing data
+  filter(
+    !is.na(JURISDICTION_CODE),
+    !is.na(Latitude),
+    !is.na(Longitude)
+  ) %>%
+  # update invalid demographic values to "UNKNOWN"
+  mutate(
+    PERP_AGE_GROUP = ifelse(PERP_AGE_GROUP %in% c("1020", "940", "224", "2021", "", "(null)"), "UNKNOWN", PERP_AGE_GROUP),
+    PERP_SEX       = ifelse(PERP_SEX       %in% c("", "(null)"), "U", PERP_SEX),
+    PERP_RACE      = ifelse(PERP_RACE      %in% c("", "(null)"), "UNKNOWN", PERP_RACE),
+    VIC_AGE_GROUP  = ifelse(VIC_AGE_GROUP  %in% c("1020", "940", "224", "2021", "1022", "", "(null)"), "UNKNOWN", VIC_AGE_GROUP),
+    VIC_SEX        = ifelse(VIC_SEX        %in% c("", "(null)"), "U", VIC_SEX),
+    VIC_RACE       = ifelse(VIC_RACE       %in% c("", "(null)"), "UNKNOWN", VIC_RACE)
+  )
+
+summary(df)
+```
+
+now we have cleaner dataset to moving forward
+
+
+**PART II) DATA VISUALIZATION AND EXPLORING ANALYSIS**
+
+1) visuallize data distribution across location
+
+*checking developing pattern overtime of murder and non-murder case by location*
+```{r, fig.width=10, fig.height=8}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+# Prepare and aggregate data
+yearly_data <- df %>%
+  filter(!is.na(OCCUR_DATE)) %>%
+  mutate(
+    year = year(OCCUR_DATE),
+    STATISTICAL_MURDER_FLAG = as.numeric(STATISTICAL_MURDER_FLAG)
+  ) %>%
+  group_by(BORO, year) %>%
+  summarise(
+    total_cases = n(),
+    murder_cases = sum(STATISTICAL_MURDER_FLAG),
+    murder_rate = murder_cases / total_cases,
+    .groups = "drop"
+  )
+
+# Plot: bar for total cases, line for murder rate (scaled)
+ggplot(yearly_data, aes(x = year)) +
+  geom_col(aes(y = total_cases), fill = "steelblue", alpha = 0.5) +
+  geom_line(aes(y = murder_rate * max(total_cases), group = 1), color = "firebrick", linewidth = 1.) +
+  facet_wrap(~ BORO) +
+  scale_y_continuous(
+    name = "Total Occured Cases",
+    sec.axis = sec_axis(~ . / max(yearly_data$total_cases), name = "Murder Rate")
+  ) +
+  labs(title = "Yearly Murder Rate and Total Occurred Cases by BORO",
+       x = "Year") +
+  theme_minimal()
+```
+
+**COMMENT:**
+
+1) max murder rate over year in average below 0.25
+
+2) in 2005 observed high rate in Staten Island, and high fluctuation over year, suggesting the rate is influenced by low number of case occurred in the area. 
+
+3) Brooklyn encounter stably lift in murder rate from 2015 to 2020, while number of occured case decrease in the same time, suggesting more focus needed in this area to identify potential factors of murder.
+
+*study different characters of victims on each area*
+```{r, fig.width=16, fig.height=5}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+
+# Prepare AGE GROUP data
+age_data <- df %>%
+  filter(!is.na(BORO), !is.na(VIC_AGE_GROUP)) %>%
+  count(BORO, VIC_AGE_GROUP) %>%
+  mutate(Type = "Age Group", Category = VIC_AGE_GROUP)
+
+# Prepare SEX data
+sex_data <- df %>%
+  filter(!is.na(BORO), !is.na(VIC_SEX)) %>%
+  count(BORO, VIC_SEX) %>%
+  mutate(Type = "Sex", Category = VIC_SEX)
+
+# Prepare RACE data
+race_data <- df %>%
+  filter(!is.na(BORO), !is.na(VIC_RACE)) %>%
+  count(BORO, VIC_RACE) %>%
+  mutate(Type = "Race", Category = VIC_RACE)
+
+# Plot AGE GROUP chart
+plot_age <- ggplot(age_data, aes(x = BORO, y = n, fill = Category)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Victim Age Group by Location",
+    x = "Location",
+    y = "Number of Victims",
+    fill = "Age Group"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+
+# Plot GENDER chart
+plot_sex <- ggplot(sex_data, aes(x = BORO, y = n, fill = Category)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Victim Gender by Location",
+    x = "Location",
+    y = "Number of Victims",
+    fill = "Sex"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+
+# Plot RACE chart
+plot_race <- ggplot(race_data, aes(x = BORO, y = n, fill = Category)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Victim Race by Location",
+    x = "Location",
+    y = "Number of Victims",
+    fill = "Race"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+ 
+grid.arrange(plot_age, plot_sex, plot_race, ncol = 3)
+
+```
+
+**COMMENT**
+
+  we can quickly observe majority of victim in murder cases are concentrating on certain group across location, such as male or age range in 18 - 44 or black
+  
+  it raise a question if there is any connection between Victim and Perpetrator?
+
+*check potential relation between victim and Perpetrator.*
+```{r, fig.width=25, fig.height=25}
+library(dplyr)
+library(ggplot2)
+library(plotly)
+
+# Filter clean data
+df_demo <- df %>%
+  filter(
+    !is.na(PERP_AGE_GROUP), !is.na(PERP_SEX), !is.na(PERP_RACE),
+    !is.na(VIC_AGE_GROUP), !is.na(VIC_SEX), !is.na(VIC_RACE)
+  )
+
+# Race relationship
+race_data <- df_demo %>%
+  count(PERP_RACE, VIC_RACE)
+
+# Sex relationship
+sex_data <- df_demo %>%
+  count(PERP_SEX, VIC_SEX)
+
+# Age group relationship
+age_data <- df_demo %>%
+  count(PERP_AGE_GROUP, VIC_AGE_GROUP)
+
+# Common theme with reduced text size
+small_text_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(size = 9),
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 5),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 5),
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+
+# Race plot
+p_race <- ggplot(race_data, aes(x = PERP_RACE, y = VIC_RACE, size = n, color = n)) +
+  geom_point(alpha = 0.7) +
+  scale_size_continuous(range = c(3, 10)) +
+  scale_color_gradient(low = "lightblue", high = "darkred") +
+  labs(
+    title = "Race Relationship: Perpetrator vs Victim",
+    x = "Perpetrator Race",
+    y = "Victim Race",
+    size = "Cases",
+    color = "Cases"
+  ) +
+  small_text_theme
+
+# Sex plot
+p_sex <- ggplot(sex_data, aes(x = PERP_SEX, y = VIC_SEX, size = n, color = n)) +
+  geom_point(alpha = 0.7) +
+  scale_size_continuous(range = c(3, 10)) +
+  scale_color_gradient(low = "lightblue", high = "darkred") +
+  labs(
+    title = "Sex Relationship: Perpetrator vs Victim",
+    x = "Perpetrator Sex",
+    y = "Victim Sex",
+    size = "Cases",
+    color = "Cases"
+  ) +
+  small_text_theme
+
+# Age group plot
+p_age <- ggplot(age_data, aes(x = PERP_AGE_GROUP, y = VIC_AGE_GROUP, size = n, color = n)) +
+  geom_point(alpha = 0.7) +
+  scale_size_continuous(range = c(3, 10)) +
+  scale_color_gradient(low = "lightblue", high = "darkred") +
+  labs(
+    title = "Age Group Relationship: Perpetrator vs Victim",
+    x = "Perpetrator Age Group",
+    y = "Victim Age Group",
+    size = "Cases",
+    color = "Cases"
+  ) +
+  small_text_theme
+
+# Convert to interactive plotly objects
+# Convert to interactive plotly objects with height and width specified
+plot_age  <- ggplotly(p_age, width = 800, height = 600)
+plot_sex  <- ggplotly(p_sex, width = 800, height = 600)
+plot_race <- ggplotly(p_race, width = 800, height = 600)
+
+# Combine plots without deprecated layout sizing
+subplot(
+  plot_age,
+  plot_sex,
+  plot_race,
+  nrows = 3,
+  margin = 0.06,
+  titleX = TRUE,
+  titleY = TRUE,
+  shareX = FALSE,
+  shareY = FALSE,
+  heights = c(0.3, 0.2, 0.5)
+)
+```
+
+**COMMENT:**
+
+1) majority of victim are black, male and age between 18 to 44, sharing the same characters to the perpetrators.
+
+2) on the other hand, the unknown group of perpetrator also share a big portion on all incident (indicate NOT all the occured cases got resolved), suggeting further enrich data is needed, to avoid potential bias from partial identified cases only.
+
+
+*visuallize murder case distribution by reproting hour, split by location*
+```{r, fig.width=16, fig.height=10}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+#data clean
+df <- df %>%
+  mutate(HOUR = hour(hms(OCCUR_TIME)))
+
+# Step 1: Filter for murder cases and extract hour
+murder_data <- df %>%
+  filter(STATISTICAL_MURDER_FLAG == 1, !is.na(OCCUR_TIME), !is.na(BORO)) %>%
+  mutate(HOUR = hour(hms(OCCUR_TIME))) %>%
+  count(BORO, HOUR)
+
+# Step 2: Plot distribution by hour, split by location
+ggplot(murder_data, aes(x = HOUR, y = n)) +
+  geom_line(color = "firebrick", size = 1) +
+  facet_wrap(~ BORO, ncol = 2) +
+  labs(
+    title = "Murder Case Distribution by Occuring Hour",
+    x = "Hour of Day",
+    y = "Number of Cases"
+  ) +
+  scale_x_continuous(breaks = 0:23) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(angle = 90, hjust = 1)
+  )
+```
+
+**COMMENT:**
+
+  - at first glance, the rate of murder in Staten Island is staying at lower level comparing to remaining areas. 
+  
+  - and looking across hours, we observe similar trend, that more of murder cases happening from the afternoon onwards, and getting quiet down around 8AM - 11AM. Implicate the possibility that during the peak time of social activities, lowering the ratio of incident.
+  
+  - in general, murder ratios peak during late night hours across most boroughs, suggesting heightened vulnerability during this time. Afternoon and morning periods show relatively lower ratios, indicating safer conditions. These patterns highlight the importance of targeted policing and public awareness during high-risk time windows.
+  
+
+*let sort out the time across areas to see if they share common timeframe:*
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+# Step 1: Extract hour and define time-of-day group
+df <- df %>%
+  mutate(
+    HOUR = hour(hms(OCCUR_TIME)),
+    TIME_GROUP = case_when(
+      HOUR >= 3 & HOUR < 6 ~ "Early Morning",
+      HOUR >= 6 & HOUR < 12 ~ "Morning",
+      HOUR >= 12 & HOUR < 18 ~ "Afternoon",
+      HOUR >= 18 & HOUR < 21 ~ "Evening",
+      HOUR >= 21 | HOUR < 3 ~ "Late Night"
+    )
+  )
+
+# Step 2: Count total cases per BORO and TIME_GROUP
+total_cases <- df %>%
+  filter(!is.na(TIME_GROUP), !is.na(BORO)) %>%
+  count(BORO, TIME_GROUP, name = "total")
+
+# Step 3: Count murder cases per BORO and TIME_GROUP
+murder_cases <- df %>%
+  filter(STATISTICAL_MURDER_FLAG == 1, !is.na(TIME_GROUP), !is.na(BORO)) %>%
+  count(BORO, TIME_GROUP, name = "murder")
+
+# Step 4: Join and calculate murder ratio, then reorder TIME_GROUP
+murder_ratio <- left_join(total_cases, murder_cases, by = c("BORO", "TIME_GROUP")) %>%
+  mutate(
+    murder = murder,
+    ratio = murder / total
+  ) %>%
+  arrange(ratio) %>%
+  mutate(
+    TIME_GROUP = factor(TIME_GROUP, levels = unique(TIME_GROUP))
+  )
+
+# Step 5: Plot murder ratio by time group and borough
+ggplot(murder_ratio, aes(x = TIME_GROUP, y = ratio, group = BORO)) +
+  geom_line(aes(color = BORO), size = 1) +
+  geom_point(aes(color = BORO), size = 2) +
+  labs(
+    title = "Murder Ratio by Time of Day",
+    x = "Time of Day",
+    y = "Murder Ratio"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1),
+    legend.position = "bottom"
+  )
+```
+
+**COMMENT:**
+
+although we observe above that number of case murder in Staten island is lowest compared to other areas, however the ratio seem to be most highlighted when the murder ratio up to 40% in morning time.
+
+**========================CONCLUSION=======================**: 
+
+Most safety plans focus on nighttime, but recent data shows something different: higher murder rate happened in the morning—between 6 AM and 12 PM, potentially more attention to male in age 18 - 44.
+This means we may need to shift our focus. Instead of only watching the streets at night, we should also prioritize the activity prior to these hours:
+
+- Add more patrols
+
+- Use cameras or remote tools to spot unusual activity
+
+- Post public warnings to the areas having higher rate of men participated in respective age to increase awareness i.e building construction area
+
+- Cover all boroughs, not just the ones highlighting the trouble.
+
+Using data like this helps cities make smarter choices and keep people safer when they least expect problems.
+
+
+**POTENTIAL BIAS**
+
+Without knowing the distribution of race, age, and gender in those locations, it brings potential bias to the conclusions to design effective prevention strategies. Thus, to improve public safety and reduce crime, we need to collect more detailed demographic data. This would allow for a more precise approach—tailoring resources and interventions to the specific needs of each community, rather than relying on raw case counts alone
+
+
+**PART III) MODEL DEVELOPMENT**
+
+to predict probability of new incident report to be murder or non-murder:
+
+1) modeling to predict a new report to be murder or non-murder, base on reporting hour, location, ect. 
+
+2) splitting train and test with ratio 70:30
+
+3) using logistic regression & XGBoost algo to compare performance.
+
+4) key metrics for evaluation: Accuracy score + AUC-ROC score
+
+
+*try logistic regression*
+```{r}
+# Load required libraries
+# Load required libraries
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+# Step 1: Prepare the data
+model_data <- df %>%
+  filter(!is.na(OCCUR_DATE), !is.na(BORO), !is.na(LOC_OF_OCCUR_DESC),!is.na(STATISTICAL_MURDER_FLAG), !is.na(PERP_SEX)) %>%
+  mutate(
+    HOUR = hour(hms(OCCUR_TIME)),
+    MURDER = STATISTICAL_MURDER_FLAG
+  ) %>%
+  select(MURDER, HOUR, BORO, LOC_OF_OCCUR_DESC, PERP_SEX)
+ 
+# Step 2: Train-test split (70/30)
+set.seed(123)
+sample_size <- floor(0.7 * nrow(model_data))
+train_indices <- sample(seq_len(nrow(model_data)), size = sample_size)
+train_data <- model_data[train_indices, ]
+test_data <- model_data[-train_indices, ]
+
+# Step 3: Fit logistic regression model
+logit_model <- glm(MURDER ~ HOUR + BORO + LOC_OF_OCCUR_DESC + PERP_SEX, data = train_data, family = binomial,
+                   control = glm.control(maxit = 100))
+
+# Step 4: Predict on test set
+test_data$pred_prob <- predict(logit_model, newdata = test_data, type = "response")
+test_data$pred_class <- ifelse(test_data$pred_prob > 0.5, 1, 0)
+
+# Step 5: Evaluate model
+accuracy <- mean(test_data$pred_class == test_data$MURDER)
+conf_matrix <- table(Predicted = test_data$pred_class, Actual = test_data$MURDER)
+
+# Step 6: Manual AUC ROC calculation
+thresholds <- seq(0, 1, by = 0.01)
+actual <- test_data$MURDER
+pred <- test_data$pred_prob
+
+roc_points <- sapply(thresholds, function(t) {
+  predicted <- ifelse(pred > t, 1, 0)
+  TP <- sum(predicted == 1 & actual == 1)
+  FP <- sum(predicted == 1 & actual == 0)
+  FN <- sum(predicted == 0 & actual == 1)
+  TN <- sum(predicted == 0 & actual == 0)
+  TPR <- ifelse((TP + FN) == 0, 0, TP / (TP + FN))
+  FPR <- ifelse((FP + TN) == 0, 0, FP / (FP + TN))
+  c(TPR, FPR)
+})
+
+roc_df <- data.frame(
+  Threshold = thresholds,
+  TPR = roc_points[1, ],
+  FPR = roc_points[2, ]
+)
+
+# Step 7: Plot ROC curve
+ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  labs(
+    title = "ROC Curve for Murder Prediction (Hour + Location)",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal()
+
+# Step 8: Approximate AUC using trapezoidal rule
+roc_df <- roc_df[order(roc_df$FPR), ]
+auc_score <- sum(diff(roc_df$FPR) * (head(roc_df$TPR, -1) + tail(roc_df$TPR, -1)) / 2)
+
+# Step 9: Output results
+print(summary(logit_model))
+print(paste("Accuracy:", round(accuracy, 3)))
+print("Confusion Matrix:")
+print(conf_matrix)
+print(paste("Approximate AUC:", round(auc_score, 3)))
+
+```
+
+
+*try XGBoost*
+```{r}
+# Load required libraries
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(xgboost)
+
+# Step 1: Prepare the data
+model_data <- df %>%
+  filter(
+    !is.na(OCCUR_DATE),
+    !is.na(OCCUR_TIME),
+    !is.na(BORO),
+    !is.na(LOC_OF_OCCUR_DESC),
+    !is.na(PERP_SEX),
+    !is.na(STATISTICAL_MURDER_FLAG)
+  ) %>%
+  mutate(
+    HOUR = hour(hms(OCCUR_TIME)),
+    MURDER = STATISTICAL_MURDER_FLAG,
+    BORO = as.character(BORO),
+    LOC_OF_OCCUR_DESC = as.character(LOC_OF_OCCUR_DESC),
+    PERP_SEX = as.character(PERP_SEX)
+  ) %>%
+  select(MURDER, HOUR, BORO, LOC_OF_OCCUR_DESC, PERP_SEX)
+
+
+# Step 3: One-hot encode categorical variables
+model_matrix <- model.matrix(MURDER ~ . - 1, data = model_data)
+labels <- model_data$MURDER
+
+# Step 4: Train-test split (70/30)
+set.seed(123)
+sample_size <- floor(0.7 * nrow(model_matrix))
+train_indices <- sample(seq_len(nrow(model_matrix)), size = sample_size)
+
+train_matrix <- model_matrix[train_indices, ]
+train_labels <- labels[train_indices]
+
+test_matrix <- model_matrix[-train_indices, ]
+test_labels <- labels[-train_indices]
+
+# Step 5: Train XGBoost model
+xgb_model <- xgboost(
+  data = train_matrix,
+  label = train_labels,
+  objective = "binary:logistic",
+  nrounds = 100,
+  verbose = 0
+)
+
+# Step 6: Predict on test set
+pred_prob <- predict(xgb_model, test_matrix)
+pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+
+# Step 7: Evaluate model
+accuracy <- mean(pred_class == test_labels)
+conf_matrix <- table(Predicted = pred_class, Actual = test_labels)
+
+# Step 8: Manual AUC ROC calculation
+thresholds <- seq(0, 1, by = 0.01)
+roc_points <- sapply(thresholds, function(t) {
+  predicted <- ifelse(pred_prob > t, 1, 0)
+  TP <- sum(predicted == 1 & test_labels == 1)
+  FP <- sum(predicted == 1 & test_labels == 0)
+  FN <- sum(predicted == 0 & test_labels == 1)
+  TN <- sum(predicted == 0 & test_labels == 0)
+  TPR <- ifelse((TP + FN) == 0, 0, TP / (TP + FN))
+  FPR <- ifelse((FP + TN) == 0, 0, FP / (FP + TN))
+  c(TPR, FPR)
+})
+
+roc_df <- data.frame(
+  Threshold = thresholds,
+  TPR = roc_points[1, ],
+  FPR = roc_points[2, ]
+)
+
+# Step 9: Plot ROC curve
+ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", size = 1.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  labs(
+    title = "ROC Curve for Murder Prediction (XGBoost)",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal()
+
+# Step 10: Approximate AUC using trapezoidal rule
+roc_df <- roc_df[order(roc_df$FPR), ]
+auc_score <- sum(diff(roc_df$FPR) * (head(roc_df$TPR, -1) + tail(roc_df$TPR, -1)) / 2)
+
+# Step 11: Output results
+print(paste("Accuracy:", round(accuracy, 3)))
+print("Confusion Matrix:")
+print(conf_matrix)
+print(paste("Approximate AUC:", round(auc_score, 3)))
+
+```
+
+**CONCLUSION:**
+
+1) base on AUC score and accuracy score, observing Logistic regression perform better than XGBoost in this scope of dataset. On the otherhand, training on full dataset across long span of years can weaken predictive due to character's changes overtime (i.e surveilance measure, migration policy, living condition, ect.).
+
+2) accuracy rate from both models are low at below .6, therefore suggesting extra analysis for model optimization to future work:
+ - analysis on month, or day in a week, or more derrived features to see correlation with the murder rate, expecting to identify a pattern to allocate the police resource or the safety guide to people in respective zone.
+ - analysis on impact in more recent time i.e from 2020 to get more information of recent event rather than using influence from the past, base on assumption of social demographic changes overtime also impact to shifting in people's behaviors and reaction to shooting incidents.
+
+
+
+
+

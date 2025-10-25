@@ -1,0 +1,467 @@
+---
+title: "COVID analysis"
+output:
+  html_document: default
+  pdf_document: default
+date: "2025-10-25"
+---
+
+**==INTRODUCTION==**
+
+**In this scope of analysis for Covid19, I will reuse the approach from lecture including the analysis on US cases, with model built up to predict death case per Covid reported cases in US region. You will find later the additional analysis on top 10 and bottom 10 countries on death rate, which will expose some outlinear data need to pre-process before jumping to to validate the hypothesis that if death rate associate with population of those top 10 countries.
+At the end, there is conclusion with bias consideration**
+
+
+*First, let's setup neccessary tools*
+
+```{r setup, include=FALSE}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+packages to install before start
+```{r}
+install.packages("stringr")  # Install the package
+install.packages("plotly")   # Install the package
+install.packages("tinytex")
+tinytex::install_tinytex(force = TRUE)
+```
+
+*fetch the link and import data*
+```{r}
+library(tidyverse)
+# base url
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_global.csv",
+                "time_series_covid19_deaths_global.csv",
+                "time_series_covid19_confirmed_US.csv",
+                "time_series_covid19_deaths_US.csv")
+urls <- str_c(url_in,file_names)
+
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_,Combined_Key, code3,iso2,iso3, Admin2))
+```
+
+*read data*
+```{r, message = FALSE}
+library(dplyr)
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+US_cases <- read_csv(urls[3])
+US_deaths <- read_csv(urls[4])
+```
+
+*inspect global cases dataset*
+```{r tidy_global_data}
+global_cases <- global_cases %>% 
+  pivot_longer(cols= -c(`Province/State`, `Country/Region`, Lat, Long), names_to = 'date', values_to = 'cases') %>%
+  select(-c(Lat, Long))
+
+global_deaths <- global_deaths %>% 
+  pivot_longer(cols= -c(`Province/State`, `Country/Region`, Lat, Long), names_to = 'date', values_to = 'deaths') %>%
+  select(-c(Lat, Long))
+```
+
+
+*transform data*
+```{r transform_global_1}
+library(lubridate) # Loading library for date conversion
+
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = `Country/Region`,
+         Province_State = `Province/State`) %>%
+  mutate(date = mdy(date))
+
+summary(global)
+```
+
+```{r transform_global_2}
+global <- global %>%
+  filter(cases > 0)
+
+summary(global)
+```
+*check data validity*
+```{r}
+global %>% filter(cases > 100000000)
+```
+
+*transform global_deaths and combine in global data*
+```{r}
+global <- global %>%
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE
+        )
+```
+
+
+*join global data to uid mapping*
+```{r}
+global <- global%>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+```
+
+
+*Processing on US_cases dataset*
+```{r}
+US_cases <- US_cases %>% 
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(Admin2:cases) %>% 
+  mutate(date=mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+```
+
+
+*let's have a look on new US_cases*
+```{r}
+US_cases
+```
+
+*Now we do the same to US_deaths dataset*
+```{r}
+US_deaths <- US_deaths %>% 
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(Admin2:deaths) %>% 
+  mutate(date=mdy(date)) %>%
+  select(-c(Lat,Long_))
+```
+
+*now have a look on new set*
+```{r}
+US_deaths
+```
+
+*let's merge 2 set of US together*
+```{r}
+US <- US_cases %>%
+  full_join(US_deaths)
+```
+
+
+**==DATA VISUALLIZATION==**
+
+*Grouping on country --able to exchange*
+```{r}
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths*1000000 / Population) %>%
+  select(Province_State, Country_Region, date, cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+
+print(US_by_state)
+```
+
+
+```{r}
+US_total <- US_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths), Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths*1000000/Population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+print(tail(US_total))
+```
+
+
+*now lets try to visualize this data after our cleanup*
+```{r}
+US_total %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x=date, y=cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y=deaths, color = "deaths")) +
+  geom_point(aes(y=deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 90)) + labs(title = "COVID19 in US", y = NULL)
+```
+**we see in begin of pandemic, in US the death cases were on par with Covid19 cases, and number of cases keep increased overtime and only stable after 1st quarter of 2022.
+Also we can see in later time, especially from 2022, although the case was increased but the death didn't show the increase trend**
+
+
+```{r}
+state <- "New York"
+US_by_state %>%
+  filter(Province_State == state) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x= date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+
+```
+
+
+```{r}
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+US_total <- US_total %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths- lag(deaths))
+```
+
+
+```{r}
+US_total %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+        axis.title.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+```
+
+```{r}
+US_state_totals <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases),
+            population = max(Population),
+            cases_per_thou = 1000*cases/population,
+            deaths_per_thou = 1000*deaths/population) %>%
+  filter(cases > 0, population > 0)
+  
+US_state_totals %>%
+  slice_min(deaths_per_thou, n=10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+
+US_state_totals %>%
+  slice_max(deaths_per_thou, n=10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+```
+
+
+**==MODELING==**
+
+*here we try to build model to predict number of death case by given number of covid cases using reference from US regions*
+```{r}
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals)
+summary(mod)
+```
+**From above result, we got the model statistically reliable (with p-value < 0.05) and able to explains approximately 29.33% of the variability in the death rate across states (with R-adj 0.2933)**
+
+```{r}
+x_grid <- seq(1, 151)
+new_df <- tibble(cases_per_thou = x_grid)
+US_state_totals %>% mutate(pred = predict(mod))
+```
+
+```{r}
+US_tot_w_pred <- US_state_totals %>% mutate(pred = predict(mod))
+US_tot_w_pred
+```
+
+```{r}
+US_tot_w_pred %>% 
+  ggplot() +
+  
+  geom_point(aes(x= cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x=cases_per_thou, y = pred), color  = "red")
+  
+```
+
+**we see overall predicted line is a straight line follow the trend of reported cases, suggesting that while actual death cases varied in different regions likely by various factors such as different healthcare system, the model still successfully predicts that as the total reported case burden in a region increases, the total death toll will increase accordingly.**
+
+
+**==ADDITIONAL ANALYSIS==**
+
+*check the trend of other country to allocate proper resource, for example vaccine distribution priority. Here we look on top 10 and bottom 10 countries to see if there is potential different*
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+date_group <- global %>%
+  mutate(date = as.Date(date),
+         event_month = format(date, "%m/%Y"),
+         event_month = as.Date(paste0("01/", event_month), format = "%d/%m/%Y")
+         )
+
+death_rate <- date_group %>%
+  group_by(Country_Region, event_month) %>%
+  summarise(
+    total_deaths = sum(deaths, na.rm = TRUE),
+    total_cases = sum(cases, na.rm = TRUE),
+    death_rate = (total_deaths / total_cases) * 100,
+    .groups = "drop"
+  )
+
+top_countries <- death_rate %>%
+  group_by(Country_Region) %>%
+  summarise(avg_rate = mean(death_rate, na.rm = TRUE)) %>%
+  slice_max(avg_rate, n = 10)
+
+bottom_countries <- death_rate %>%
+  group_by(Country_Region) %>%
+  summarise(avg_rate = mean(death_rate, na.rm = TRUE)) %>%
+  slice_min(avg_rate, n = 10)
+
+filtered_data <- death_rate %>%
+  filter(Country_Region %in% top_countries$Country_Region | Country_Region %in% bottom_countries$Country_Region)
+
+ggplot(filtered_data, aes(x = event_month, y = death_rate, group = Country_Region, color = Country_Region)) +
+  geom_smooth(se = FALSE, size = 1.2) +
+  labs(
+    title = "Top 10 Countries by Death Rate (%) Over Time",
+    x = "event_month",
+    y = "Death Rate (%)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+*Look like North Korea, have some incorrect data when the death is higher than cases, and some data not on Country but location of Olympic event which not on our focus for country level, as well particular region show death rate < 0 which could be incorrect data*
+
+*let's see detail of it*
+```{r}
+filter_outliner <- global %>% filter(
+    Country_Region == 'Korea, North' | Country_Region == 'Winter Olympics 2022' | Country_Region == 'Summer Olympics 2020' | 
+    Country_Region == 'Vanuatu')
+
+rbind(filter_outliner[1:5, ], filter_outliner[600:605, ])
+```
+
+**here we see seem the number of cases & number of deaths in these regions seem to be incorrect data as number of death by COVID is higher than number of cases recorded as COVID, or the region missing Population data (consider as not valid region for analysis). We will exclude the outlier from dataset**
+
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(plotly)
+
+# Clean global data
+adjusted_global <- global %>%
+  filter(!Country_Region %in% c('Korea, North', 'Winter Olympics 2022', 'Summer Olympics 2020','Vanuatu'))
+
+# Prepare date and event_month
+date_group <- adjusted_global %>%
+  mutate(
+    date = as.Date(date),
+    event_month = format(date, "%m/%Y"),
+    event_month = as.Date(paste0("01/", event_month), format = "%d/%m/%Y")
+  )
+
+death_rate <- date_group %>%
+  group_by(Country_Region, event_month) %>%
+  summarise(
+    total_deaths = sum(deaths, na.rm = TRUE),
+    total_cases = sum(cases, na.rm = TRUE),
+    death_rate = (total_deaths / total_cases) * 100
+  )
+
+country_avg <- death_rate %>%
+  group_by(Country_Region) %>%
+  summarise(avg_rate = mean(death_rate, na.rm = TRUE))
+
+top_countries <- country_avg %>% slice_max(avg_rate, n = 10)
+bottom_countries <- country_avg %>% slice_min(avg_rate, n = 10)
+
+selected_countries <- c(top_countries$Country_Region, bottom_countries$Country_Region)
+
+filtered_data <- death_rate %>%
+  filter(Country_Region %in% selected_countries)
+
+p <- ggplot(filtered_data, aes(x = event_month, y = death_rate, group = Country_Region, color = Country_Region)) +
+  geom_smooth(se = FALSE, size = 1.2) +
+  labs(title = "Top & Bottom 10 Countries by Death Rate (%) Over Time", x = "Month", y = "Death Rate (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggplotly(p)
+
+```
+
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(plotly) 
+
+country_summary <- adjusted_global %>%
+  mutate(
+    date = as.Date(date),
+    event_month = as.Date(paste0("01/", format(date, "%m/%Y")), format = "%d/%m/%Y")
+  ) %>%
+  group_by(Country_Region, event_month) %>%
+  summarise(
+    total_deaths = sum(deaths, na.rm = TRUE),
+    total_cases = sum(cases, na.rm = TRUE),
+    Population = mean(Population, na.rm = TRUE), 
+    death_rate = (total_deaths / total_cases) * 100,
+    .groups = 'drop'
+  ) %>%
+  group_by(Country_Region) %>%
+  summarise(
+    avg_rate = mean(death_rate, na.rm = TRUE),
+    Population = mean(Population, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+top_countries <- country_summary %>% 
+    slice_max(avg_rate, n = 10) %>%
+    filter(Population > 0, !is.na(Population))
+
+# Calculate Pearson correlation values
+correlation_result <- cor.test(
+    x = top_countries$avg_rate,
+    y = top_countries$Population,
+    method = "pearson"
+)
+
+r_val <- round(correlation_result$estimate, 4)
+p_val <- format.pval(correlation_result$p.value, digits = 4)
+
+p_corr <- ggplot(top_countries, aes(x = Population, y = avg_rate, label = Country_Region)) +
+  geom_point(size = 3, color = "#FF6666") +
+  geom_smooth(method = "lm", se = TRUE, color = "#0072B2") +
+  labs(
+    title = "Population vs. Average Death Rate (%) for Top 10 Countries",
+    subtitle = paste("Pearson r =", r_val, ", P-value =", p_val),
+    x = "Population",
+    y = "Average Death Rate (%)"
+  ) +
+  scale_x_continuous(labels = scales::comma) + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplotly(p_corr)
+```
+
+
+**we see that death rate is not systematically linked to the size of their population; therefore, we need to look on other factors such as early outbreak severity, testing policies, healthcare system capacity, or demographic structure.**
+
+
+
+**====CONCLUSION====**
+
+
+**While the data suggest potential model (i.e reference to US) can be use to predict increased death rate per increased Covid cases, or suggesting potential method to validate our assumption (i.e reference in additional analysis), we need to be aware the bias in dataset as it solely base on reported case, which means there are also case got Covid but not being reported, and relatively death case from patient has Covid but the cause of death may not directly because of Covid but due to other reasons. In order to mitigate this problem, we should validate the conclusion through various sample sizes, i.e using various population subsets, and apply regularization method to reduce the bias effect.**
+
